@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarMirror Auto</string>
+    <string name="notification_channel_name">Araç Ekran Yansıtma</string>
+    <string name="notification_title">CarMirror Auto Aktif</string>
+    <string name="notification_text">Telefon ekranı gecikmesiz olarak araç ekranına yansıtılıyor</string>
+</resources>

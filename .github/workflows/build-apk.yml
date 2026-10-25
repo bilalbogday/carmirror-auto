@@ -1,0 +1,54 @@
+name: Build CarMirror Auto APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Signed APK
+        run: |
+          gradle assembleRelease assembleDebug --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk CarMirror-Auto.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarMirror-Auto-APK
+          path: CarMirror-Auto.apk
+
+      - name: Publish Direct Download Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: "CarMirror Auto v1.0.0 (Doğrudan Kurulabilir APK)"
+          body: |
+            ### 🚗 CarMirror Auto - Sıfır Gecikmeli Android Auto Ekran Yansıtma
+            Telefonunuzdan aşağıdaki **`CarMirror-Auto.apk`** dosyasına dokunarak doğrudan indirip kurabilirsiniz.
+          files: CarMirror-Auto.apk
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
