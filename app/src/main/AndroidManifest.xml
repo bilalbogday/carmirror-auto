@@ -18,6 +18,11 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Package visibility for Android Auto on Android 11+ -->
+    <queries>
+        <package android:name="com.google.android.projection.gearhead" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -62,7 +67,8 @@
             android:name=".car.CarMirrorCarAppService"
             android:exported="true"
             android:label="@string/app_name"
-            android:icon="@mipmap/ic_launcher">
+            android:icon="@drawable/ic_car_launcher"
+            tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.NAVIGATION" />

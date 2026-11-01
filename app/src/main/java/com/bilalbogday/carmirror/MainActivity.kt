@@ -66,6 +66,34 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateOverlayPermissionUi()
+        updateInstallDiagnosticUi()
+    }
+
+    private fun updateInstallDiagnosticUi() {
+        val installerPkg = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                packageManager.getInstallSourceInfo(packageName).installingPackageName
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getInstallerPackageName(packageName)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+
+        val colorGreen = ContextCompat.getColor(this, R.color.accent_green)
+        val colorAmber = ContextCompat.getColor(this, R.color.accent_amber)
+
+        if (installerPkg == "com.android.vending") {
+            binding.tvInstallDiagnostic.text =
+                "✓ Kurulum Kaynağı: Google Play Store (com.android.vending) — Araç ekranı doğrulaması onaylı."
+            binding.tvInstallDiagnostic.setTextColor(colorGreen)
+        } else {
+            val srcLabel = installerPkg ?: "Tarayıcı / Paket Yükleyici"
+            binding.tvInstallDiagnostic.text =
+                "⚠ Kurulum Kaynağı: $srcLabel — Google Play dışı kurulum olduğu için Android Auto gerçek araç ekranında bu uygulamayı gizleyebilir."
+            binding.tvInstallDiagnostic.setTextColor(colorAmber)
+        }
     }
 
     private fun loadPreferences() {

@@ -324,13 +324,24 @@
                     android:textStyle="bold" />
 
                 <TextView
+                    android:id="@+id/tvInstallDiagnostic"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="3dp"
+                    android:text="Kurulum kaynağı kontrol ediliyor..."
+                    android:textColor="@color/accent_amber"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:lineSpacingExtra="4dp"
-                    android:text="1. Aşağıdaki 'Android Auto Ayarlarını Aç' butonuna dokunun.\n2. En alttaki 'Sürüm (Version)' yazısına arka arkaya 10 kez dokunup Geliştirici Modunu açın.\n3. Sağ üstteki üç nokta (⋮) menüsünden 'Geliştirici ayarları'na girin ve en alttaki 'Bilinmeyen kaynaklar (Unknown sources)' kutucuğunu işaretleyin.\n4. Telefonunuzu USB veya Kablosuz olarak arabaya bağlayın, araba ekranında 'CarMirror Auto' uygulamasını açın!"
+                    android:text="ÖNEMLİ (Google Android Auto Kısıtlaması):\nGoogle, gerçek araç ekranlarında 'Bilinmeyen Kaynaklar' ayarını CarAppService (video yüzeyi) uygulamaları için devre dışı bırakmıştır. Tarayıcıdan doğrudan kurulan APK'lar Android Auto güvenlik doğrulayıcısı (CAR.VALIDATOR) tarafından araç ekranında gizlenir. Gerçek araç ekranında görünmesi için AAB paketinin Google Play Console (Internal App Sharing / Dahili Test) üzerinden kurulması veya Geliştirici Ana Ünitesi (DHU / AAWireless Developer Mode) kullanılması gerekir."
                     android:textColor="@color/text_secondary"
-                    android:textSize="13sp" />
+                    android:textSize="12sp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnOpenAaSettings"

@@ -26,26 +26,32 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build Signed APK
+      - name: Build Signed APK and AAB
         run: |
-          gradle assembleRelease assembleDebug --no-daemon
-          cp app/build/outputs/apk/release/app-release.apk CarMirror-Auto.apk
+          gradle assembleDebug assembleRelease bundleRelease --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk CarMirror-Auto.apk
+          cp app/build/outputs/bundle/release/app-release.aab CarMirror-Auto.aab
 
-      - name: Upload APK Artifact
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CarMirror-Auto-APK
-          path: CarMirror-Auto.apk
+          path: |
+            CarMirror-Auto.apk
+            CarMirror-Auto.aab
 
       - name: Publish Direct Download Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: "CarMirror Auto v1.0.0 (Doğrudan Kurulabilir APK)"
+          tag_name: v1.1.0
+          name: "CarMirror Auto v1.1.0 (Güncellenmiş APK & Play Bundle)"
           body: |
-            ### 🚗 CarMirror Auto - Sıfır Gecikmeli Android Auto Ekran Yansıtma
-            Telefonunuzdan aşağıdaki **`CarMirror-Auto.apk`** dosyasına dokunarak doğrudan indirip kurabilirsiniz.
-          files: CarMirror-Auto.apk
+            ### 🚗 CarMirror Auto v1.1.0
+            - `CarAppService` (`onCreateSession(SessionInfo)`), `NavigationManager`, vektör ikon ve Android 11-16 paket görünürlüğü (`<queries>`) düzeltmeleri eklendi.
+            - Geliştirici modu / DHU için `CarMirror-Auto.apk` ve resmi Google Play Dahili Test (Internal App Sharing) dağıtımı için `CarMirror-Auto.aab` eklendi.
+          files: |
+            CarMirror-Auto.apk
+            CarMirror-Auto.aab
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

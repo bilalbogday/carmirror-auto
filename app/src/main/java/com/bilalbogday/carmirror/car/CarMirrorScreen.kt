@@ -10,9 +10,10 @@ import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
-import androidx.car.app.model.CarColor
 import androidx.car.app.model.CarIcon
 import androidx.car.app.model.Template
+import androidx.car.app.navigation.NavigationManager
+import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -54,11 +55,25 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
                 } catch (t: Throwable) {
                     Log.e(TAG, "Failed to register SurfaceCallback", t)
                 }
+                try {
+                    carContext.getCarService(NavigationManager::class.java)
+                        .setNavigationManagerCallback(object : NavigationManagerCallback {
+                            override fun onStopNavigation() {
+                                // Keep screen active even if navigation stop is signaled
+                            }
+                        })
+                } catch (t: Throwable) {
+                    Log.w(TAG, "NavigationManager callback registration skipped", t)
+                }
             }
 
             override fun onDestroy(owner: LifecycleOwner) {
                 MirrorState.removeListener(stateListener)
                 CarSurfaceRegistry.onCarSurfaceDestroyed()
+                try {
+                    carContext.getCarService(NavigationManager::class.java).clearNavigationManagerCallback()
+                } catch (_: Throwable) {
+                }
             }
         })
     }
@@ -80,19 +95,15 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
 
     override fun onGetTemplate(): Template {
         val state = MirrorState.state.value
-        val icon = CarIcon.Builder(
-            IconCompat.createWithResource(carContext, R.drawable.ic_car_mirror)
+        val scaleIcon = CarIcon.Builder(
+            IconCompat.createWithResource(carContext, R.drawable.ic_scale_mode)
+        ).build()
+        val dimIcon = CarIcon.Builder(
+            IconCompat.createWithResource(carContext, R.drawable.ic_dim_mode)
         ).build()
 
-        // NavigationTemplate allows max 1 action with a custom text title in ActionStrip
-        val primaryTitle = if (state.isMirroring) {
-            state.scaleMode.shortCarLabel
-        } else {
-            "Telefondan Başlat"
-        }
-
-        val primaryAction = Action.Builder()
-            .setTitle(primaryTitle)
+        val scaleAction = Action.Builder()
+            .setIcon(scaleIcon)
             .setOnClickListener {
                 if (!MirrorState.state.value.isMirroring) {
                     try {
@@ -118,10 +129,8 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
             }
             .build()
 
-        // Second action uses icon-only to comply with NavigationTemplate ActionStrip constraints
         val dimIconAction = Action.Builder()
-            .setIcon(icon)
-            .setBackgroundColor(if (state.dimPhoneScreen) CarColor.GREEN else CarColor.DEFAULT)
+            .setIcon(dimIcon)
             .setOnClickListener {
                 val dimmed = MirrorState.toggleDimPhoneScreen()
                 val msg = if (dimmed) {
@@ -134,12 +143,21 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
             .build()
 
         val actionStrip = ActionStrip.Builder()
-            .addAction(primaryAction)
+            .addAction(scaleAction)
             .addAction(dimIconAction)
             .build()
 
-        return NavigationTemplate.Builder()
+        val builder = NavigationTemplate.Builder()
             .setActionStrip(actionStrip)
-            .build()
+
+        if (carContext.carAppApiLevel >= 2) {
+            builder.setMapActionStrip(
+                ActionStrip.Builder()
+                    .addAction(Action.PAN)
+                    .build()
+            )
+        }
+
+        return builder.build()
     }
 }
