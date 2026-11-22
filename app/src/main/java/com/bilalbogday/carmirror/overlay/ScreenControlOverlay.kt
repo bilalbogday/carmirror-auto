@@ -2,6 +2,7 @@ package com.bilalbogday.carmirror.overlay
 
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
@@ -13,9 +14,10 @@ import android.view.WindowManager
 
 /**
  * Hardware Backlight Dimmer & Auto-Landscape Controller.
- * Uses a 1x1 transparent TYPE_APPLICATION_OVERLAY window so:
- * 1) Phone screen brightness is lowered at the hardware panel level (screenBrightness = 0.001f)
- *    WITHOUT darkening the SurfaceFlinger framebuffer captured by MediaProjection!
+ * Uses a 1x1 transparent TYPE_APPLICATION_OVERLAY window with alpha = 1.0f (required so
+ * WindowManagerService does not skip the window during orientation & brightness evaluation):
+ * 1) Lowers phone physical display backlight (screenBrightness = 0.005f) WITHOUT darkening
+ *    the SurfaceFlinger framebuffer captured by MediaProjection!
  * 2) Forces system-wide Landscape orientation (SCREEN_ORIENTATION_SENSOR_LANDSCAPE) so
  *    all phone apps fill the wide car display naturally.
  */
@@ -55,15 +57,17 @@ class ScreenControlOverlay(private val context: Context) {
                     ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 }
 
+                // 0.005f forces minimum physical panel backlight across Samsung/Xiaomi/Pixel OEMs
                 val brightness = if (dimPhoneScreen) {
-                    0.001f // Minimum hardware panel backlight while keeping VirtualDisplay 100% bright
+                    0.005f
                 } else {
                     WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 }
 
                 if (overlayView == null) {
                     val view = View(context).apply {
-                        alpha = 0f
+                        setBackgroundColor(Color.TRANSPARENT)
+                        alpha = 1.0f
                     }
                     val params = WindowManager.LayoutParams(
                         1,
@@ -75,6 +79,7 @@ class ScreenControlOverlay(private val context: Context) {
                         gravity = Gravity.TOP or Gravity.START
                         x = 0
                         y = 0
+                        alpha = 1.0f
                         screenOrientation = orientation
                         screenBrightness = brightness
                     }
@@ -83,6 +88,7 @@ class ScreenControlOverlay(private val context: Context) {
                     layoutParams = params
                 } else {
                     val params = layoutParams ?: return@post
+                    params.alpha = 1.0f
                     params.screenOrientation = orientation
                     params.screenBrightness = brightness
                     windowManager.updateViewLayout(overlayView, params)
@@ -107,9 +113,5 @@ class ScreenControlOverlay(private val context: Context) {
         }
         overlayView = null
         layoutParams = null
-    }
-
-    private fun Int.FLAG_Not_TOUCHABLE_SAFE(): Int {
-        return WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
     }
 }

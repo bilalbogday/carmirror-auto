@@ -22,6 +22,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.bilalbogday.carmirror.MainActivity
@@ -56,9 +57,40 @@ class MirrorForegroundService : Service() {
     private var glEngine: MirrorGlEngine? = null
     private var screenOverlay: ScreenControlOverlay? = null
     private var webServer: LocalWebMirrorServer? = null
+    private var displayManager: DisplayManager? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+
+    private var lastCaptureW: Int = 0
+    private var lastCaptureH: Int = 0
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == Display.DEFAULT_DISPLAY && MirrorState.state.value.isMirroring) {
+                scheduleCaptureResize()
+            }
+        }
+    }
+
+    private val resizeRunnable = Runnable {
+        if (!MirrorState.state.value.isMirroring) return@Runnable
+        try {
+            val (newW, newH, dpi) = getOptimalCaptureSize()
+            if (newW != lastCaptureW || newH != lastCaptureH) {
+                lastCaptureW = newW
+                lastCaptureH = newH
+                glEngine?.updateSourceSize(newW, newH)
+                virtualDisplay?.resize(newW, newH, dpi)
+                MirrorState.updateSourceSize(newW, newH)
+                Log.i(TAG, "Resized capture for display rotation: ${newW}x${newH}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to resize capture on display change", t)
+        }
+    }
 
     private val stateListener: (MirrorUiState) -> Unit = { state ->
         screenOverlay?.applyState(
@@ -83,6 +115,8 @@ class MirrorForegroundService : Service() {
         super.onCreate()
         createNotificationChannel()
         screenOverlay = ScreenControlOverlay(applicationContext)
+        displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager?.registerDisplayListener(displayListener, mainHandler)
         MirrorState.addListener(stateListener)
     }
 
@@ -100,6 +134,7 @@ class MirrorForegroundService : Service() {
                 if (resultCode == Activity.RESULT_OK && resultData != null) {
                     startMirroring(resultCode, resultData)
                 } else {
+                    MirrorState.setError("Ekran yakalama verisi alınamadı.")
                     stopSelf()
                 }
             }
@@ -117,19 +152,26 @@ class MirrorForegroundService : Service() {
     }
 
     private fun startMirroring(resultCode: Int, resultData: Intent) {
-        // 1. MUST startForeground with MEDIA_PROJECTION type before getMediaProjection() on Android 10-15+
-        val initialNotif = buildNotification(MirrorState.state.value)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                initialNotif,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, initialNotif)
+        MirrorState.setError(null)
+        // 1. MUST startForeground with MEDIA_PROJECTION type before getMediaProjection() on Android 10-16
+        try {
+            val initialNotif = buildNotification(MirrorState.state.value)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    initialNotif,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, initialNotif)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "startForeground failed", t)
+            MirrorState.setError("Ön plan servisi başlatılamadı: ${t.message}")
+            stopSelf()
+            return
         }
 
-        // Clean up any previous session before starting fresh
         cleanupCaptureResources()
         acquireLocks()
 
@@ -138,6 +180,7 @@ class MirrorForegroundService : Service() {
             val projection = mpManager.getMediaProjection(resultCode, resultData)
             if (projection == null) {
                 Log.e(TAG, "getMediaProjection returned null")
+                MirrorState.setError("MediaProjection izni başlatılamadı.")
                 stopMirroringInternal()
                 return
             }
@@ -147,14 +190,17 @@ class MirrorForegroundService : Service() {
             mediaProjection = projection
 
             // 3. Start local zero-cost Wi-Fi fallback server
-            val server = LocalWebMirrorServer(port = 8080) { hasClients ->
-                glEngine?.setWebClientsActive(hasClients)
+            val server = LocalWebMirrorServer(port = 8080) { clientCount ->
+                MirrorState.updateWebClients(clientCount)
+                glEngine?.setWebClientsActive(clientCount > 0)
             }
             val localUrl = server.start()
             webServer = server
 
             // 4. Calculate optimal capture dimensions matching current phone screen aspect ratio
             val (captureW, captureH, dpi) = getOptimalCaptureSize()
+            lastCaptureW = captureW
+            lastCaptureH = captureH
 
             val engine = MirrorGlEngine(
                 initialSourceWidth = captureW,
@@ -179,46 +225,59 @@ class MirrorForegroundService : Service() {
                             null,
                             mainHandler
                         )
-                        MirrorState.updateMirroring(active = true, localWebUrl = localUrl)
+                        MirrorState.updateMirroring(
+                            active = true,
+                            localWebUrl = localUrl,
+                            sourceWidth = captureW,
+                            sourceHeight = captureH
+                        )
                         Log.i(TAG, "VirtualDisplay started: ${captureW}x${captureH} @ ${dpi}dpi")
                     } catch (t: Throwable) {
                         Log.e(TAG, "Failed to createVirtualDisplay", t)
+                        MirrorState.setError("Sanal ekran oluşturulamadı: ${t.message}")
                         stopMirroringInternal()
                     }
                 }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to start mirroring", t)
+            MirrorState.setError("Yansıtma başlatma hatası: ${t.message}")
             stopMirroringInternal()
         }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (!MirrorState.state.value.isMirroring) return
-        mainHandler.postDelayed({
-            try {
-                val (newW, newH, dpi) = getOptimalCaptureSize()
-                glEngine?.updateSourceSize(newW, newH)
-                virtualDisplay?.resize(newW, newH, dpi)
-                Log.i(TAG, "Resized capture for orientation change: ${newW}x${newH}")
-            } catch (t: Throwable) {
-                Log.w(TAG, "Failed to resize on orientation change", t)
-            }
-        }, 120L)
+        if (MirrorState.state.value.isMirroring) {
+            scheduleCaptureResize()
+        }
+    }
+
+    private fun scheduleCaptureResize() {
+        mainHandler.removeCallbacks(resizeRunnable)
+        mainHandler.postDelayed(resizeRunnable, 100L)
     }
 
     private fun getOptimalCaptureSize(): Triple<Int, Int, Int> {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
+        val rawW: Int
+        val rawH: Int
+        val dpi: Int
 
-        val rawW = max(1, metrics.widthPixels)
-        val rawH = max(1, metrics.heightPixels)
-        val dpi = max(120, metrics.densityDpi)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.maximumWindowMetrics.bounds
+            rawW = max(2, bounds.width())
+            rawH = max(2, bounds.height())
+            dpi = max(120, resources.configuration.densityDpi)
+        } else {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+            rawW = max(2, metrics.widthPixels)
+            rawH = max(2, metrics.heightPixels)
+            dpi = max(120, metrics.densityDpi)
+        }
 
-        // Cap longest edge at 1280px for ultra-low latency 60fps hardware rendering
         val maxEdge = max(rawW, rawH)
         val scale = if (maxEdge > 1280) 1280f / maxEdge.toFloat() else 1.0f
 
@@ -236,7 +295,7 @@ class MirrorForegroundService : Service() {
                 "CarMirrorAuto::MirrorWakeLock"
             )
             wl.setReferenceCounted(false)
-            wl.acquire(6 * 60 * 60 * 1000L) // Up to 6 hours drive
+            wl.acquire(6 * 60 * 60 * 1000L)
             wakeLock = wl
         } catch (_: Throwable) {
         }
@@ -276,6 +335,7 @@ class MirrorForegroundService : Service() {
     }
 
     private fun cleanupCaptureResources() {
+        mainHandler.removeCallbacks(resizeRunnable)
         try {
             virtualDisplay?.release()
         } catch (_: Throwable) {
@@ -300,6 +360,8 @@ class MirrorForegroundService : Service() {
         } catch (_: Throwable) {
         }
         webServer = null
+        lastCaptureW = 0
+        lastCaptureH = 0
     }
 
     private fun stopMirroringInternal() {
@@ -312,6 +374,10 @@ class MirrorForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            displayManager?.unregisterDisplayListener(displayListener)
+        } catch (_: Throwable) {
+        }
         MirrorState.removeListener(stateListener)
         screenOverlay?.release()
         cleanupCaptureResources()
@@ -384,10 +450,10 @@ class MirrorForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val carText = if (state.isCarSurfaceConnected) {
-            "Araç Ekranı Bağlı (${state.carWidth}x${state.carHeight})"
-        } else {
-            "Araç bağlantısı hazır"
+        val carText = when {
+            state.isCarSurfaceConnected -> "Araç Ekranı Bağlı (${state.carWidth}x${state.carHeight})"
+            state.webClientsCount > 0 -> "Wi-Fi Tarayıcı Bağlı (${state.webClientsCount} ekran)"
+            else -> "Yansıtma aktif (${state.sourceWidth}x${state.sourceHeight})"
         }
 
         val dimLabel = if (state.dimPhoneScreen) "Ekranı Aç" else "Ekranı Karart"

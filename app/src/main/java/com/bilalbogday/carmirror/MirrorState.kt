@@ -43,10 +43,14 @@ data class MirrorUiState(
     val isCarSurfaceConnected: Boolean = false,
     val carWidth: Int = 0,
     val carHeight: Int = 0,
+    val sourceWidth: Int = 0,
+    val sourceHeight: Int = 0,
     val scaleMode: ScaleMode = ScaleMode.FILL,
     val autoLandscape: Boolean = true,
     val dimPhoneScreen: Boolean = false,
-    val localWebUrl: String? = null
+    val localWebUrl: String? = null,
+    val webClientsCount: Int = 0,
+    val lastError: String? = null
 )
 
 object MirrorState {
@@ -73,8 +77,37 @@ object MirrorState {
         }
     }
 
-    fun updateMirroring(active: Boolean, localWebUrl: String? = _state.value.localWebUrl) {
-        _state.update { it.copy(isMirroring = active, localWebUrl = if (active) localWebUrl else null) }
+    fun updateMirroring(
+        active: Boolean,
+        localWebUrl: String? = _state.value.localWebUrl,
+        sourceWidth: Int = _state.value.sourceWidth,
+        sourceHeight: Int = _state.value.sourceHeight
+    ) {
+        _state.update {
+            it.copy(
+                isMirroring = active,
+                localWebUrl = if (active) localWebUrl else null,
+                sourceWidth = if (active) sourceWidth else 0,
+                sourceHeight = if (active) sourceHeight else 0,
+                webClientsCount = if (active) it.webClientsCount else 0,
+                lastError = if (active) null else it.lastError
+            )
+        }
+        notifyListeners(_state.value)
+    }
+
+    fun updateSourceSize(width: Int, height: Int) {
+        _state.update { it.copy(sourceWidth = width, sourceHeight = height) }
+        notifyListeners(_state.value)
+    }
+
+    fun updateWebClients(count: Int) {
+        _state.update { it.copy(webClientsCount = count) }
+        notifyListeners(_state.value)
+    }
+
+    fun setError(message: String?) {
+        _state.update { it.copy(lastError = message) }
         notifyListeners(_state.value)
     }
 

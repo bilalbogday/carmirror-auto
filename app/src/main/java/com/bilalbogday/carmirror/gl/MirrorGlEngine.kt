@@ -21,7 +21,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Shared registry so Android Auto CarAppService and MirrorForegroundService
@@ -70,8 +70,10 @@ object CarSurfaceRegistry {
 
 /**
  * Hardware-accelerated OpenGL ES 2.0 + EGL14 zero-latency pipeline.
- * Renders frames from MediaProjection's VirtualDisplay (OES external texture)
- * directly onto Android Auto's SurfaceContainer surface in GPU memory.
+ * - Renders MediaProjection VirtualDisplay (GL_TEXTURE_EXTERNAL_OES) directly onto
+ *   Android Auto's SurfaceContainer surface in GPU memory (< 1ms).
+ * - Independently supports right-side-up offscreen FBO capture for Local Wi-Fi Browser
+ *   streaming even when Android Auto is not connected.
  */
 class MirrorGlEngine(
     initialSourceWidth: Int,
@@ -81,7 +83,6 @@ class MirrorGlEngine(
 
     companion object {
         private const val TAG = "MirrorGlEngine"
-        private const val EGL_RECORDABLE_ANDROID = 0x3142
 
         private const val VERTEX_SHADER = """
             uniform mat4 uMVPMatrix;
@@ -104,6 +105,57 @@ class MirrorGlEngine(
                 gl_FragColor = texture2D(sTexture, vTextureCoord);
             }
         """
+
+        fun computeMvpMatrix(
+            srcW: Int,
+            srcH: Int,
+            dstW: Int,
+            dstH: Int,
+            mode: ScaleMode,
+            outMatrix: FloatArray,
+            flipY: Boolean = false
+        ) {
+            Matrix.setIdentityM(outMatrix, 0)
+            if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
+                if (flipY) Matrix.scaleM(outMatrix, 0, 1.0f, -1.0f, 1.0f)
+                return
+            }
+
+            if (flipY) {
+                Matrix.scaleM(outMatrix, 0, 1.0f, -1.0f, 1.0f)
+            }
+
+            when (mode) {
+                ScaleMode.FILL -> {
+                    // Fill 100% of destination with zero black bars
+                }
+                ScaleMode.FIT -> {
+                    val srcAspect = srcW.toFloat() / srcH.toFloat()
+                    val dstAspect = dstW.toFloat() / dstH.toFloat()
+                    if (srcAspect > dstAspect) {
+                        val scaleY = dstAspect / srcAspect
+                        Matrix.scaleM(outMatrix, 0, 1.0f, scaleY, 1.0f)
+                    } else {
+                        val scaleX = srcAspect / dstAspect
+                        Matrix.scaleM(outMatrix, 0, scaleX, 1.0f, 1.0f)
+                    }
+                }
+                ScaleMode.CROP -> {
+                    val srcAspect = srcW.toFloat() / srcH.toFloat()
+                    val dstAspect = dstW.toFloat() / dstH.toFloat()
+                    if (srcAspect > dstAspect) {
+                        val scaleX = srcAspect / dstAspect
+                        Matrix.scaleM(outMatrix, 0, scaleX, 1.0f, 1.0f)
+                    } else {
+                        val scaleY = dstAspect / srcAspect
+                        Matrix.scaleM(outMatrix, 0, 1.0f, scaleY, 1.0f)
+                    }
+                }
+                ScaleMode.ROTATE_90 -> {
+                    Matrix.rotateM(outMatrix, 0, -90f, 0f, 0f, 1f)
+                }
+            }
+        }
     }
 
     private var glThread: HandlerThread? = null
@@ -124,12 +176,22 @@ class MirrorGlEngine(
     private var aTextureCoordLoc: Int = 0
     private var uMVPMatrixLoc: Int = 0
     private var uSTMatrixLoc: Int = 0
+    private var uTextureLoc: Int = 0
+
+    // Offscreen FBO resources for independent Wi-Fi browser streaming
+    private var webFboId: Int = 0
+    private var webColorTexId: Int = 0
+    private var webFboWidth: Int = 0
+    private var webFboHeight: Int = 0
+    private var webPixelBuf: ByteBuffer? = null
+    private var webBitmap: Bitmap? = null
+    private val webJpegOut = ByteArrayOutputStream(65536)
 
     @Volatile
-    private var sourceWidth: Int = max(1, initialSourceWidth)
+    private var sourceWidth: Int = max(2, initialSourceWidth)
 
     @Volatile
-    private var sourceHeight: Int = max(1, initialSourceHeight)
+    private var sourceHeight: Int = max(2, initialSourceHeight)
 
     @Volatile
     private var carWidth: Int = 0
@@ -141,12 +203,16 @@ class MirrorGlEngine(
     private var hasPendingFrame: Boolean = false
 
     @Volatile
+    private var hasReceivedAnyFrame: Boolean = false
+
+    @Volatile
     private var webClientsActive: Boolean = false
 
     private var lastWebCaptureMs: Long = 0L
 
     private val stMatrix = FloatArray(16)
     private val mvpMatrix = FloatArray(16)
+    private val webMvpMatrix = FloatArray(16)
 
     private val vertexData = floatArrayOf(
         // X, Y, Z, U, V
@@ -167,7 +233,8 @@ class MirrorGlEngine(
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             drawFrame(isHeartbeat = true)
-            glHandler?.postDelayed(this, 50L) // 20 FPS keep-alive so car screen never blanks out
+            val delayMs = if (webClientsActive) 33L else 50L
+            glHandler?.postDelayed(this, delayMs)
         }
     }
 
@@ -184,18 +251,20 @@ class MirrorGlEngine(
                 initInputSurface()
                 Matrix.setIdentityM(stMatrix, 0)
                 Matrix.setIdentityM(mvpMatrix, 0)
+                Matrix.setIdentityM(webMvpMatrix, 0)
                 CarSurfaceRegistry.registerEngine(this)
                 inputSurface?.let { onInputSurfaceReady(it) }
                 handler.postDelayed(heartbeatRunnable, 50L)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start MirrorGlEngine", t)
+                MirrorState.setError("Grafik motoru başlatılamadı: ${t.message}")
             }
         }
     }
 
     fun updateSourceSize(newWidth: Int, newHeight: Int) {
-        val w = max(1, newWidth)
-        val h = max(1, newHeight)
+        val w = max(2, newWidth)
+        val h = max(2, newHeight)
         glHandler?.post {
             sourceWidth = w
             sourceHeight = h
@@ -206,6 +275,13 @@ class MirrorGlEngine(
 
     fun setWebClientsActive(active: Boolean) {
         webClientsActive = active
+        glHandler?.post {
+            if (!active) {
+                releaseWebFbo()
+            } else {
+                drawFrame(isHeartbeat = true)
+            }
+        }
     }
 
     fun requestRedraw() {
@@ -222,20 +298,28 @@ class MirrorGlEngine(
             }
             try {
                 val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
-                carEglSurface = EGL14.eglCreateWindowSurface(
+                val newSurface = EGL14.eglCreateWindowSurface(
                     eglDisplay,
                     eglConfig,
                     surface,
                     surfaceAttribs,
                     0
                 )
-                carWidth = max(1, width)
-                carHeight = max(1, height)
+                if (newSurface == null || newSurface == EGL14.EGL_NO_SURFACE) {
+                    val err = EGL14.eglGetError()
+                    Log.e(TAG, "eglCreateWindowSurface failed: 0x${Integer.toHexString(err)}")
+                    MirrorState.setError("Araç yüzeyi bağlanamadı (EGL 0x${Integer.toHexString(err)})")
+                    return@post
+                }
+                carEglSurface = newSurface
+                carWidth = max(2, width)
+                carHeight = max(2, height)
                 Log.i(TAG, "Attached car surface: ${carWidth}x${carHeight}")
                 drawFrame(isHeartbeat = true)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to attach car surface", t)
                 carEglSurface = EGL14.EGL_NO_SURFACE
+                MirrorState.setError("Araç yüzeyi hatası: ${t.message}")
             }
         }
     }
@@ -263,6 +347,7 @@ class MirrorGlEngine(
 
     override fun onFrameAvailable(st: SurfaceTexture?) {
         hasPendingFrame = true
+        hasReceivedAnyFrame = true
         drawFrame(isHeartbeat = false)
     }
 
@@ -270,14 +355,18 @@ class MirrorGlEngine(
         if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT) return
         val st = surfaceTexture ?: return
 
-        // Always make a surface current before calling updateTexImage()
-        val targetSurface = if (carEglSurface != EGL14.EGL_NO_SURFACE) carEglSurface else pbufferSurface
+        val hasCar = carEglSurface != EGL14.EGL_NO_SURFACE && carWidth > 0 && carHeight > 0
+        val targetSurface = if (hasCar) carEglSurface else pbufferSurface
         if (targetSurface == EGL14.EGL_NO_SURFACE) return
 
         if (!EGL14.eglMakeCurrent(eglDisplay, targetSurface, targetSurface, eglContext)) {
             if (targetSurface == carEglSurface) {
                 releaseCarEglSurface()
-                EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
+                if (pbufferSurface == EGL14.EGL_NO_SURFACE ||
+                    !EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
+                ) {
+                    return
+                }
             } else {
                 return
             }
@@ -288,12 +377,17 @@ class MirrorGlEngine(
                 st.updateTexImage()
                 st.getTransformMatrix(stMatrix)
                 hasPendingFrame = false
+                hasReceivedAnyFrame = true
             } catch (_: Throwable) {
                 return
             }
         }
 
+        if (!hasReceivedAnyFrame) return
+
+        // 1. Direct GPU-to-GPU render to Android Auto car display surface
         if (carEglSurface != EGL14.EGL_NO_SURFACE && carWidth > 0 && carHeight > 0) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, carWidth, carHeight)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -304,69 +398,25 @@ class MirrorGlEngine(
                 dstW = carWidth,
                 dstH = carHeight,
                 mode = MirrorState.state.value.scaleMode,
-                outMatrix = mvpMatrix
+                outMatrix = mvpMatrix,
+                flipY = false
             )
 
-            renderQuad()
+            renderQuad(mvpMatrix)
             EGL14.eglSwapBuffers(eglDisplay, carEglSurface)
         }
 
-        // Optional local Wi-Fi browser fallback snapshot (only when a browser client is connected)
+        // 2. Independent offscreen FBO capture for Local Wi-Fi Browser streaming
         if (webClientsActive && onJpegFrameAvailable != null) {
             val now = System.currentTimeMillis()
-            if (now - lastWebCaptureMs >= 80L) {
+            if (now - lastWebCaptureMs >= 33L) {
                 lastWebCaptureMs = now
-                captureWebJpeg()
+                captureWebJpegViaFbo()
             }
         }
     }
 
-    private fun computeMvpMatrix(
-        srcW: Int,
-        srcH: Int,
-        dstW: Int,
-        dstH: Int,
-        mode: ScaleMode,
-        outMatrix: FloatArray
-    ) {
-        Matrix.setIdentityM(outMatrix, 0)
-        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return
-
-        when (mode) {
-            ScaleMode.FILL -> {
-                // Stretch to fill 100% of the car display with zero black bars
-                Matrix.setIdentityM(outMatrix, 0)
-            }
-            ScaleMode.FIT -> {
-                val srcAspect = srcW.toFloat() / srcH.toFloat()
-                val dstAspect = dstW.toFloat() / dstH.toFloat()
-                if (srcAspect > dstAspect) {
-                    val scaleY = dstAspect / srcAspect
-                    Matrix.scaleM(outMatrix, 0, 1.0f, scaleY, 1.0f)
-                } else {
-                    val scaleX = srcAspect / dstAspect
-                    Matrix.scaleM(outMatrix, 0, scaleX, 1.0f, 1.0f)
-                }
-            }
-            ScaleMode.CROP -> {
-                val srcAspect = srcW.toFloat() / srcH.toFloat()
-                val dstAspect = dstW.toFloat() / dstH.toFloat()
-                if (srcAspect > dstAspect) {
-                    val scaleX = srcAspect / dstAspect
-                    Matrix.scaleM(outMatrix, 0, scaleX, 1.0f, 1.0f)
-                } else {
-                    val scaleY = dstAspect / srcAspect
-                    Matrix.scaleM(outMatrix, 0, 1.0f, scaleY, 1.0f)
-                }
-            }
-            ScaleMode.ROTATE_90 -> {
-                // Rotate 90 degrees counter-clockwise and fill car screen
-                Matrix.rotateM(outMatrix, 0, -90f, 0f, 0f, 1f)
-            }
-        }
-    }
-
-    private fun renderQuad() {
+    private fun renderQuad(matrix: FloatArray) {
         GLES20.glUseProgram(programId)
 
         vertexBuffer.position(0)
@@ -377,60 +427,172 @@ class MirrorGlEngine(
         GLES20.glVertexAttribPointer(aTextureCoordLoc, 2, GLES20.GL_FLOAT, false, 5 * 4, vertexBuffer)
         GLES20.glEnableVertexAttribArray(aTextureCoordLoc)
 
-        GLES20.glUniformMatrix4fv(uMVPMatrixLoc, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(uMVPMatrixLoc, 1, false, matrix, 0)
         GLES20.glUniformMatrix4fv(uSTMatrixLoc, 1, false, stMatrix, 0)
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
+        GLES20.glUniform1i(uTextureLoc, 0)
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
     }
 
-    private fun captureWebJpeg() {
-        try {
-            val w = if (carEglSurface != EGL14.EGL_NO_SURFACE && carWidth > 0) carWidth else 640
-            val h = if (carEglSurface != EGL14.EGL_NO_SURFACE && carHeight > 0) carHeight else 360
-            if (carEglSurface == EGL14.EGL_NO_SURFACE) return
+    private fun ensureWebFbo(targetW: Int, targetH: Int): Boolean {
+        if (webFboId != 0 && webFboWidth == targetW && webFboHeight == targetH) {
+            return true
+        }
+        releaseWebFbo()
 
-            val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
-            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        val texId = texIds[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            GLES20.GL_RGBA,
+            targetW,
+            targetH,
+            0,
+            GLES20.GL_RGBA,
+            GLES20.GL_UNSIGNED_BYTE,
+            null
+        )
+
+        val fboIds = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboIds, 0)
+        val fboId = fboIds[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER,
+            GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D,
+            texId,
+            0
+        )
+
+        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+
+        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
+            Log.e(TAG, "Web FBO incomplete: 0x${Integer.toHexString(status)}")
+            return false
+        }
+
+        webFboId = fboId
+        webColorTexId = texId
+        webFboWidth = targetW
+        webFboHeight = targetH
+        webPixelBuf = ByteBuffer.allocateDirect(targetW * targetH * 4).order(ByteOrder.nativeOrder())
+        webBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        return true
+    }
+
+    private fun captureWebJpegViaFbo() {
+        try {
+            val mode = MirrorState.state.value.scaleMode
+            val rawW = if (mode == ScaleMode.ROTATE_90) sourceHeight else sourceWidth
+            val rawH = if (mode == ScaleMode.ROTATE_90) sourceWidth else sourceHeight
+            val maxEdge = max(rawW, rawH)
+            val scale = if (maxEdge > 960) 960f / maxEdge.toFloat() else 1.0f
+            val targetW = max(64, ((rawW * scale).roundToInt() / 2) * 2)
+            val targetH = max(64, ((rawH * scale).roundToInt() / 2) * 2)
+
+            if (!ensureWebFbo(targetW, targetH)) return
+            val buf = webPixelBuf ?: return
+            val bmp = webBitmap ?: return
+
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, webFboId)
+            GLES20.glViewport(0, 0, targetW, targetH)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            // Flip Y so glReadPixels produces a right-side-up Android Bitmap
+            computeMvpMatrix(
+                srcW = sourceWidth,
+                srcH = sourceHeight,
+                dstW = targetW,
+                dstH = targetH,
+                mode = if (mode == ScaleMode.ROTATE_90) ScaleMode.ROTATE_90 else ScaleMode.FILL,
+                outMatrix = webMvpMatrix,
+                flipY = true
+            )
+            renderQuad(webMvpMatrix)
+
             buf.rewind()
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            GLES20.glReadPixels(0, 0, targetW, targetH, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            buf.rewind()
             bmp.copyPixelsFromBuffer(buf)
-            val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, 70, out)
-            bmp.recycle()
-            onJpegFrameAvailable?.invoke(out.toByteArray())
+            webJpegOut.reset()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 72, webJpegOut)
+            onJpegFrameAvailable?.invoke(webJpegOut.toByteArray())
+        } catch (t: Throwable) {
+            Log.w(TAG, "captureWebJpegViaFbo failed: ${t.message}")
+        }
+    }
+
+    private fun releaseWebFbo() {
+        if (webFboId != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(webFboId), 0)
+            webFboId = 0
+        }
+        if (webColorTexId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(webColorTexId), 0)
+            webColorTexId = 0
+        }
+        webFboWidth = 0
+        webFboHeight = 0
+        webPixelBuf = null
+        try {
+            webBitmap?.recycle()
         } catch (_: Throwable) {
         }
+        webBitmap = null
     }
 
     private fun initEgl() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+            throw RuntimeException("EGL_NO_DISPLAY")
+        }
         val version = IntArray(2)
-        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            throw RuntimeException("eglInitialize failed")
+        }
 
-        val attribList = intArrayOf(
+        val primaryAttribs = intArrayOf(
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE
         )
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
-        if (!EGL14.eglChooseConfig(eglDisplay, attribList, 0, configs, 0, configs.size, numConfigs, 0) || numConfigs[0] <= 0) {
+        if (!EGL14.eglChooseConfig(eglDisplay, primaryAttribs, 0, configs, 0, configs.size, numConfigs, 0) || numConfigs[0] <= 0) {
             val fallbackAttribs = intArrayOf(
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
                 EGL14.EGL_NONE
             )
-            EGL14.eglChooseConfig(eglDisplay, fallbackAttribs, 0, configs, 0, configs.size, numConfigs, 0)
+            if (!EGL14.eglChooseConfig(eglDisplay, fallbackAttribs, 0, configs, 0, configs.size, numConfigs, 0) || numConfigs[0] <= 0) {
+                throw RuntimeException("No matching EGLConfig found")
+            }
         }
         eglConfig = configs[0]
 
@@ -439,6 +601,9 @@ class MirrorGlEngine(
             EGL14.EGL_NONE
         )
         eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            throw RuntimeException("eglCreateContext failed")
+        }
 
         val pbufferAttribs = intArrayOf(
             EGL14.EGL_WIDTH, 16,
@@ -446,7 +611,13 @@ class MirrorGlEngine(
             EGL14.EGL_NONE
         )
         pbufferSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbufferAttribs, 0)
-        EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
+        if (pbufferSurface == EGL14.EGL_NO_SURFACE) {
+            throw RuntimeException("eglCreatePbufferSurface failed")
+        }
+
+        if (!EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)) {
+            throw RuntimeException("eglMakeCurrent failed")
+        }
     }
 
     private fun initGlProgram() {
@@ -457,10 +628,19 @@ class MirrorGlEngine(
         GLES20.glAttachShader(programId, fShader)
         GLES20.glLinkProgram(programId)
 
+        val linkStatus = IntArray(1)
+        GLES20.glGetProgramiv(programId, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        if (linkStatus[0] != GLES20.GL_TRUE) {
+            val info = GLES20.glGetProgramInfoLog(programId)
+            GLES20.glDeleteProgram(programId)
+            throw RuntimeException("GL program link failed: $info")
+        }
+
         aPositionLoc = GLES20.glGetAttribLocation(programId, "aPosition")
         aTextureCoordLoc = GLES20.glGetAttribLocation(programId, "aTextureCoord")
         uMVPMatrixLoc = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
         uSTMatrixLoc = GLES20.glGetUniformLocation(programId, "uSTMatrix")
+        uTextureLoc = GLES20.glGetUniformLocation(programId, "sTexture")
     }
 
     private fun initInputSurface() {
@@ -485,6 +665,13 @@ class MirrorGlEngine(
         val shader = GLES20.glCreateShader(type)
         GLES20.glShaderSource(shader, source)
         GLES20.glCompileShader(shader)
+        val compiled = IntArray(1)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+        if (compiled[0] == 0) {
+            val info = GLES20.glGetShaderInfoLog(shader)
+            GLES20.glDeleteShader(shader)
+            throw RuntimeException("Shader compile failed ($type): $info")
+        }
         return shader
     }
 
@@ -501,6 +688,7 @@ class MirrorGlEngine(
     }
 
     private fun releaseAllGl() {
+        releaseWebFbo()
         releaseCarEglSurface()
         try {
             inputSurface?.release()

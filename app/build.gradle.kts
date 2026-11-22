@@ -11,8 +11,8 @@ android {
         applicationId = "com.bilalbogday.carmirror"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
     }
 
     buildTypes {
@@ -54,4 +54,6 @@ dependencies {
     // Official Android for Cars / Android Auto Projected Surface API
     implementation("androidx.car.app:app:1.4.0")
     implementation("androidx.car.app:app-projected:1.4.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

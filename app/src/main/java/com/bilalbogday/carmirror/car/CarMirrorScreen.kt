@@ -1,6 +1,8 @@
 package com.bilalbogday.carmirror.car
 
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.car.app.AppManager
 import androidx.car.app.CarContext
@@ -30,7 +32,9 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
         private const val TAG = "CarMirrorScreen"
     }
 
-    private var lastIsMirroring = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isDestroyed = false
+    private var lastIsMirroring = MirrorState.state.value.isMirroring
     private var lastScaleMode = MirrorState.state.value.scaleMode
     private var lastDimMode = MirrorState.state.value.dimPhoneScreen
 
@@ -42,13 +46,22 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
             lastIsMirroring = state.isMirroring
             lastScaleMode = state.scaleMode
             lastDimMode = state.dimPhoneScreen
-            invalidate()
+            // Screen.invalidate() MUST always be called on the main thread
+            mainHandler.post {
+                if (!isDestroyed) {
+                    try {
+                        invalidate()
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
         }
     }
 
     init {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onCreate(owner: LifecycleOwner) {
+                isDestroyed = false
                 MirrorState.addListener(stateListener)
                 try {
                     carContext.getCarService(AppManager::class.java).setSurfaceCallback(this@CarMirrorScreen)
@@ -59,7 +72,7 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
                     carContext.getCarService(NavigationManager::class.java)
                         .setNavigationManagerCallback(object : NavigationManagerCallback {
                             override fun onStopNavigation() {
-                                // Keep screen active even if navigation stop is signaled
+                                // Keep mirroring surface active
                             }
                         })
                 } catch (t: Throwable) {
@@ -68,8 +81,13 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
             }
 
             override fun onDestroy(owner: LifecycleOwner) {
+                isDestroyed = true
                 MirrorState.removeListener(stateListener)
                 CarSurfaceRegistry.onCarSurfaceDestroyed()
+                try {
+                    carContext.getCarService(AppManager::class.java).setSurfaceCallback(null)
+                } catch (_: Throwable) {
+                }
                 try {
                     carContext.getCarService(NavigationManager::class.java).clearNavigationManagerCallback()
                 } catch (_: Throwable) {
@@ -94,7 +112,6 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
     }
 
     override fun onGetTemplate(): Template {
-        val state = MirrorState.state.value
         val scaleIcon = CarIcon.Builder(
             IconCompat.createWithResource(carContext, R.drawable.ic_scale_mode)
         ).build()
@@ -147,17 +164,8 @@ class CarMirrorScreen(carContext: CarContext) : Screen(carContext), SurfaceCallb
             .addAction(dimIconAction)
             .build()
 
-        val builder = NavigationTemplate.Builder()
+        return NavigationTemplate.Builder()
             .setActionStrip(actionStrip)
-
-        if (carContext.carAppApiLevel >= 2) {
-            builder.setMapActionStrip(
-                ActionStrip.Builder()
-                    .addAction(Action.PAN)
-                    .build()
-            )
-        }
-
-        return builder.build()
+            .build()
     }
 }

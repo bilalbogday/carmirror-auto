@@ -26,9 +26,9 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build Signed APK and AAB
+      - name: Run Unit Tests & Build Signed APK and AAB
         run: |
-          gradle assembleDebug assembleRelease bundleRelease --no-daemon
+          gradle testDebugUnitTest assembleDebug assembleRelease bundleRelease --no-daemon
           cp app/build/outputs/apk/debug/app-debug.apk CarMirror-Auto.apk
           cp app/build/outputs/bundle/release/app-release.aab CarMirror-Auto.aab
 
@@ -43,12 +43,14 @@ jobs:
       - name: Publish Direct Download Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
-          name: "CarMirror Auto v1.1.0 (Güncellenmiş APK & Play Bundle)"
+          tag_name: v1.2.0
+          name: "CarMirror Auto v1.2.0 (EGL/FBO/Overlay/Android 14+ Düzeltmeleri)"
           body: |
-            ### 🚗 CarMirror Auto v1.1.0
-            - `CarAppService` (`onCreateSession(SessionInfo)`), `NavigationManager`, vektör ikon ve Android 11-16 paket görünürlüğü (`<queries>`) düzeltmeleri eklendi.
-            - Geliştirici modu / DHU için `CarMirror-Auto.apk` ve resmi Google Play Dahili Test (Internal App Sharing) dağıtımı için `CarMirror-Auto.aab` eklendi.
+            ### 🚗 CarMirror Auto v1.2.0
+            - **OpenGL/EGL Motoru Düzeltildi:** `EGL_WINDOW_BIT | EGL_PBUFFER_BIT` yapılandırması eklendi ve bağımsız FBO (düz yönlü 30 FPS) Wi-Fi tarayıcı akışı çalışır hale getirildi.
+            - **Otomatik Yatay Mod & Ekran Karartma Düzeltildi:** `ScreenControlOverlay` görünürlük bayrağı (`alpha = 1.0f`, şeffaf zemin, `0.005f` arka ışık) Android 10–16 uyumlu hale getirildi.
+            - **Android Auto Kararlılık Düzeltmesi:** `CarMirrorScreen.invalidate()` ana iş parçacığına (main thread) alındı ve `DisplayListener` ile gerçek zamanlı ekran dönüş algılama eklendi.
+            - **Android 14/15/16 Tam Ekran Yakalama:** `MediaProjectionConfig.createConfigForDefaultDisplay()` ile tek uygulama seçici atlanıp doğrudan tam ekran yansıtma seçiliyor.
           files: |
             CarMirror-Auto.apk
             CarMirror-Auto.aab

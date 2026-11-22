@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var isRenderingUi = false
 
     private val screenCaptureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -135,6 +137,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnScaleRotate.setOnClickListener { selectScaleMode(ScaleMode.ROTATE_90) }
 
         binding.switchAutoLandscape.setOnCheckedChangeListener { _, isChecked ->
+            if (isRenderingUi) return@setOnCheckedChangeListener
             if (isChecked && !Settings.canDrawOverlays(this)) {
                 Toast.makeText(
                     this,
@@ -148,8 +151,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.switchDimScreen.setOnCheckedChangeListener { _, isChecked ->
+            if (isRenderingUi) return@setOnCheckedChangeListener
             if (isChecked && !Settings.canDrawOverlays(this)) {
+                isRenderingUi = true
                 binding.switchDimScreen.isChecked = false
+                isRenderingUi = false
                 Toast.makeText(
                     this,
                     "Ekran karartma modu için önce 'Üstte Gösterme' izni verin.",
@@ -191,7 +197,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestMediaProjection() {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        screenCaptureLauncher.launch(mpManager.createScreenCaptureIntent())
+        val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mpManager.createScreenCaptureIntent(
+                MediaProjectionConfig.createConfigForDefaultDisplay()
+            )
+        } else {
+            mpManager.createScreenCaptureIntent()
+        }
+        screenCaptureLauncher.launch(captureIntent)
     }
 
     private fun observeMirrorState() {
@@ -205,62 +218,82 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderUi(state: MirrorUiState) {
-        val colorGreen = ContextCompat.getColor(this, R.color.accent_green)
-        val colorAmber = ContextCompat.getColor(this, R.color.accent_amber)
-        val colorRed = ContextCompat.getColor(this, R.color.accent_red)
-        val colorBlue = ContextCompat.getColor(this, R.color.accent_blue)
-        val colorChip = ContextCompat.getColor(this, R.color.chip_bg)
+        isRenderingUi = true
+        try {
+            val colorGreen = ContextCompat.getColor(this, R.color.accent_green)
+            val colorAmber = ContextCompat.getColor(this, R.color.accent_amber)
+            val colorRed = ContextCompat.getColor(this, R.color.accent_red)
+            val colorBlue = ContextCompat.getColor(this, R.color.accent_blue)
+            val colorChip = ContextCompat.getColor(this, R.color.chip_bg)
 
-        if (state.isMirroring) {
-            binding.tvMirrorStatus.text = "● Yansıtma Durumu: AKTİF (Sıfır Gecikmeli Akış)"
-            binding.tvMirrorStatus.setTextColor(colorGreen)
-            binding.btnToggleMirror.text = "YANSITMAYI DURDUR"
-            binding.btnToggleMirror.backgroundTintList = ColorStateList.valueOf(colorRed)
-        } else {
-            binding.tvMirrorStatus.text = "● Yansıtma Durumu: Hazır (Beklemede)"
-            binding.tvMirrorStatus.setTextColor(colorAmber)
-            binding.btnToggleMirror.text = "EKRAN YANSITMAYI BAŞLAT"
-            binding.btnToggleMirror.backgroundTintList = ColorStateList.valueOf(colorBlue)
-        }
+            when {
+                state.lastError != null -> {
+                    binding.tvMirrorStatus.text = "● Hata: ${state.lastError}"
+                    binding.tvMirrorStatus.setTextColor(colorRed)
+                    binding.btnToggleMirror.text = "EKRAN YANSITMAYI BAŞLAT"
+                    binding.btnToggleMirror.backgroundTintList = ColorStateList.valueOf(colorBlue)
+                }
+                state.isMirroring -> {
+                    val resText = if (state.sourceWidth > 0) " (${state.sourceWidth}x${state.sourceHeight})" else ""
+                    binding.tvMirrorStatus.text = "● Yansıtma Durumu: AKTİF$resText"
+                    binding.tvMirrorStatus.setTextColor(colorGreen)
+                    binding.btnToggleMirror.text = "YANSITMAYI DURDUR"
+                    binding.btnToggleMirror.backgroundTintList = ColorStateList.valueOf(colorRed)
+                }
+                else -> {
+                    binding.tvMirrorStatus.text = "● Yansıtma Durumu: Hazır (Beklemede)"
+                    binding.tvMirrorStatus.setTextColor(colorAmber)
+                    binding.btnToggleMirror.text = "EKRAN YANSITMAYI BAŞLAT"
+                    binding.btnToggleMirror.backgroundTintList = ColorStateList.valueOf(colorBlue)
+                }
+            }
 
-        if (state.isCarSurfaceConnected) {
-            binding.tvCarSurfaceStatus.text =
-                "🚗 Araç Ekranı (Android Auto): BAĞLI (${state.carWidth}x${state.carHeight})"
-            binding.tvCarSurfaceStatus.setTextColor(colorGreen)
-        } else {
-            binding.tvCarSurfaceStatus.text =
-                "🚗 Araç Ekranı (Android Auto): Araç ekranından CarMirror Auto'yu açın"
-            binding.tvCarSurfaceStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
-        }
+            if (state.isCarSurfaceConnected) {
+                binding.tvCarSurfaceStatus.text =
+                    "🚗 Araç Ekranı (Android Auto): BAĞLI (${state.carWidth}x${state.carHeight})"
+                binding.tvCarSurfaceStatus.setTextColor(colorGreen)
+            } else {
+                binding.tvCarSurfaceStatus.text =
+                    "🚗 Araç Ekranı (Android Auto): Araç ekranından CarMirror Auto'yu açın"
+                binding.tvCarSurfaceStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+            }
 
-        binding.tvCurrentScaleDesc.text = state.scaleMode.descTr
+            binding.tvCurrentScaleDesc.text = state.scaleMode.descTr
 
-        binding.btnScaleFill.backgroundTintList = ColorStateList.valueOf(
-            if (state.scaleMode == ScaleMode.FILL) colorBlue else colorChip
-        )
-        binding.btnScaleFit.backgroundTintList = ColorStateList.valueOf(
-            if (state.scaleMode == ScaleMode.FIT) colorBlue else colorChip
-        )
-        binding.btnScaleCrop.backgroundTintList = ColorStateList.valueOf(
-            if (state.scaleMode == ScaleMode.CROP) colorBlue else colorChip
-        )
-        binding.btnScaleRotate.backgroundTintList = ColorStateList.valueOf(
-            if (state.scaleMode == ScaleMode.ROTATE_90) colorBlue else colorChip
-        )
+            binding.btnScaleFill.backgroundTintList = ColorStateList.valueOf(
+                if (state.scaleMode == ScaleMode.FILL) colorBlue else colorChip
+            )
+            binding.btnScaleFit.backgroundTintList = ColorStateList.valueOf(
+                if (state.scaleMode == ScaleMode.FIT) colorBlue else colorChip
+            )
+            binding.btnScaleCrop.backgroundTintList = ColorStateList.valueOf(
+                if (state.scaleMode == ScaleMode.CROP) colorBlue else colorChip
+            )
+            binding.btnScaleRotate.backgroundTintList = ColorStateList.valueOf(
+                if (state.scaleMode == ScaleMode.ROTATE_90) colorBlue else colorChip
+            )
 
-        if (binding.switchAutoLandscape.isChecked != state.autoLandscape) {
-            binding.switchAutoLandscape.isChecked = state.autoLandscape
-        }
-        if (binding.switchDimScreen.isChecked != state.dimPhoneScreen) {
-            binding.switchDimScreen.isChecked = state.dimPhoneScreen
-        }
+            if (binding.switchAutoLandscape.isChecked != state.autoLandscape) {
+                binding.switchAutoLandscape.isChecked = state.autoLandscape
+            }
+            if (binding.switchDimScreen.isChecked != state.dimPhoneScreen) {
+                binding.switchDimScreen.isChecked = state.dimPhoneScreen
+            }
 
-        if (state.localWebUrl != null) {
-            binding.tvLocalWebFallback.text =
-                "🌐 Yerel Wi-Fi Tarayıcı Adresi (İnternetsiz): ${state.localWebUrl}"
-        } else {
-            binding.tvLocalWebFallback.text =
-                "🌐 Ek Wi-Fi Tarayıcı Yedeği: Yansıtma başladığında yerel adres burada görünür"
+            if (state.localWebUrl != null) {
+                val clientsText = if (state.webClientsCount > 0) {
+                    " • ${state.webClientsCount} tarayıcı bağlı"
+                } else {
+                    ""
+                }
+                binding.tvLocalWebFallback.text =
+                    "🌐 Yerel Wi-Fi Tarayıcı Adresi (İnternetsiz): ${state.localWebUrl}$clientsText"
+            } else {
+                binding.tvLocalWebFallback.text =
+                    "🌐 Ek Wi-Fi Tarayıcı Yedeği: Yansıtma başladığında yerel adres burada görünür"
+            }
+        } finally {
+            isRenderingUi = false
         }
     }
 
